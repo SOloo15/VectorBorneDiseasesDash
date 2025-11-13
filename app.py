@@ -8,7 +8,13 @@ import numpy as np
 import rasterio
 from matplotlib import cm, pyplot as plt
 from rasterio.warp import transform_bounds
-from shiny import App, ui, render
+from shiny import App, ui, render, reactive
+
+GRADIENT_COLORS = ["#440154", "#3b528b", "#21918c", "#5ec962", "#fde725"]
+GRADIENT_CSS = ", ".join(
+    f"{color} {int(i / (len(GRADIENT_COLORS) - 1) * 100)}%"
+    for i, color in enumerate(GRADIENT_COLORS)
+)
 
 mosquito_variables = {
     "Egg Count": "mosquito_Egg_count_",
@@ -110,6 +116,10 @@ app_ui = ui.page_navbar(
                     value=date_min,
                     step=timedelta(days=1),
                 ),
+                ui.div(
+                    ui.output_ui("legend_panel"),
+                    style="margin-top:1.5rem;",
+                ),
             ),
             ui.div(
                 {"class": "app-main"},
@@ -124,6 +134,65 @@ app_ui = ui.page_navbar(
 )
 
 def server(input, output, session):
+    @reactive.calc
+    def raster_overlay():
+        choice = input.selected_variable()
+        selected_date = input.selected_date()
+        if not choice or not selected_date:
+            return None
+
+        prefix = variable_options.get(choice, "")
+        date_str = selected_date.strftime("%Y%m%d")
+        tiff_path = os.path.join("rasters_by_date", f"{prefix}{date_str}.tif")
+        if not os.path.exists(tiff_path):
+            return None
+
+        with rasterio.open(tiff_path) as src:
+            band = src.read(1, masked=True).astype(float)
+            bounds_src = src.bounds
+            crs = src.crs
+
+        if crs is not None and crs.to_string() != "EPSG:4326":
+            left, bottom, right, top = transform_bounds(crs, "EPSG:4326", *bounds_src)
+        else:
+            left, bottom, right, top = (
+                bounds_src.left,
+                bounds_src.bottom,
+                bounds_src.right,
+                bounds_src.top,
+            )
+
+        masked_band = np.ma.masked_invalid(band)
+        if masked_band.count() == 0:
+            return None
+
+        data = masked_band.filled(np.nan)
+        vmin = float(np.nanmin(data))
+        vmax = float(np.nanmax(data))
+        norm = np.zeros_like(data)
+        if not np.isclose(vmin, vmax):
+            norm = (data - vmin) / (vmax - vmin)
+        norm = np.ma.array(norm, mask=~np.isfinite(data))
+
+        cmap = cm.get_cmap("viridis").copy()
+        cmap.set_bad(alpha=0)
+
+        buf = BytesIO()
+        plt.imsave(buf, norm, cmap=cmap, format="png")
+        buf.seek(0)
+        image_uri = f"data:image/png;base64,{base64.b64encode(buf.read()).decode('utf-8')}"
+
+        return {
+            "image_uri": image_uri,
+            "bounds": ((bottom, left), (top, right)),
+            "legend": {
+                "label": choice,
+                "date_label": selected_date.strftime("%d %b %Y"),
+                "vmin": vmin,
+                "vmax": vmax,
+            },
+        }
+
     @output
     @render.ui
     def leaflet_map():
@@ -132,47 +201,63 @@ def server(input, output, session):
             zoom_start=5,
             tiles="CartoDB positron",
             width="100%",
-            height="100%",
+            height=700,
         )
-        choice = input.selected_variable()
-        selected_date = input.selected_date()
-        if choice and selected_date:
-            prefix = variable_options.get(choice, "")
-            date_str = selected_date.strftime("%Y%m%d")
-            tiff_name = f"{prefix}{date_str}.tif"
-            tiff_path = os.path.join("rasters_by_date", tiff_name)
-            if os.path.exists(tiff_path):
-                with rasterio.open(tiff_path) as src:
-                    band = src.read(1, masked=True).astype(float)
-                    bounds = src.bounds
-                    crs = src.crs
 
-                if crs is not None and crs.to_string() != "EPSG:4326":
-                    bounds = transform_bounds(crs, "EPSG:4326", *bounds)
+        overlay = raster_overlay()
+        if overlay is not None:
+            (bottom, left), (top, right) = overlay["bounds"]
+            folium.raster_layers.ImageOverlay(
+                image=overlay["image_uri"],
+                bounds=[[bottom, left], [top, right]],
+                opacity=0.7,
+            ).add_to(m)
 
-                masked_band = np.ma.masked_invalid(band)
-                if masked_band.count() > 0:
-                    data = masked_band.filled(np.nan)
-                    vmin = np.nanmin(data)
-                    vmax = np.nanmax(data)
-                    norm = np.zeros_like(data)
-                    if not np.isclose(vmin, vmax):
-                        norm = (data - vmin) / (vmax - vmin)
-                    norm = np.ma.array(norm, mask=~np.isfinite(data))
-                    cmap = cm.get_cmap("viridis").copy()
-                    cmap.set_bad(alpha=0)
-                    buf = BytesIO()
-                    plt.imsave(buf, norm, cmap=cmap, format="png")
-                    buf.seek(0)
-                    img_b64 = base64.b64encode(buf.read()).decode("utf-8")
-                    image_uri = f"data:image/png;base64,{img_b64}"
-                    folium.raster_layers.ImageOverlay(
-                        image=image_uri,
-                        bounds=[[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
-                        opacity=0.7,
-                    ).add_to(m)
         folium.LayerControl().add_to(m)
         return ui.HTML(m._repr_html_())
+
+    @output
+    @render.ui
+    def legend_panel():
+        overlay = raster_overlay()
+        if overlay is None:
+            return ui.HTML(
+                """
+                <div style="font-size:12px;color:#6c757d;">
+                    Select a variable and date to view the legend.
+                </div>
+                """
+            )
+
+        legend = overlay["legend"]
+        return ui.HTML(
+            f"""
+            <div style="
+                background: rgba(248,249,250,0.85);
+                padding: 12px 14px;
+                border-radius: 8px;
+                box-shadow: 0 0 10px rgba(0,0,0,0.15);
+                font-size: 13px;
+                line-height: 1.4;
+            ">
+                <div style="font-weight: 600; margin-bottom: 6px;">{legend['label']}</div>
+                <div style="margin-bottom: 10px;">Date: {legend['date_label']}</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div style="
+                        width: 100%;
+                        height: 16px;
+                        background-image: linear-gradient(90deg, {GRADIENT_CSS});
+                        border-radius: 4px;
+                        border: 1px solid rgba(0,0,0,0.15);
+                    "></div>
+                    <div style="display: flex; justify-content: space-between;">
+                        <span style="font-size: 11px; font-weight: 500;">{legend['vmin']:.2f}</span>
+                        <span style="font-size: 11px; font-weight: 500;">{legend['vmax']:.2f}</span>
+                    </div>
+                </div>
+            </div>
+            """
+        )
 
 app = App(app_ui, server)
 
