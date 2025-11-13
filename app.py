@@ -1,4 +1,5 @@
 from shiny import App, ui, render
+import folium
 
 app_ui = ui.page_navbar(
     ui.head_content(
@@ -22,12 +23,31 @@ app_ui = ui.page_navbar(
                 border-radius: 0.5rem;
                 box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
                 backdrop-filter: blur(6px);
+                z-index: 1000;
             }
             .app-main {
+                position: relative;
                 flex: 1 1 auto;
                 padding: 1.5rem;
-                margin-left: 360px;
-                overflow: auto;
+                margin-left: 0;
+                overflow: hidden;
+                display: flex;
+                flex-direction: column;
+                z-index: 0;
+            }
+            .app-main::after {
+                content: "";
+                position: absolute;
+                inset: 0;
+                background: rgba(255, 255, 255, 0.45);
+                backdrop-filter: blur(4px);
+                pointer-events: none;
+                z-index: -1;
+            }
+            .map-container {
+                flex: 1 1 auto;
+                min-height: 500px;
+                filter: saturate(0.8);
             }
             @media (max-width: 992px) {
                 .app-shell {
@@ -57,8 +77,11 @@ app_ui = ui.page_navbar(
             ),
             ui.div(
                 {"class": "app-main"},
-                ui.h3("Main Window"),
-                ui.output_text("text_output")
+                #ui.h3("Main Window"),
+                ui.div(
+                    {"class": "map-container"},
+                    ui.output_ui("leaflet_map")
+                )
             )
         )
     ),
@@ -70,6 +93,18 @@ def server(input, output, session):
     @render.text
     def text_output():
         return f"You entered: {input.text_input()}"
+
+    @output
+    @render.ui
+    def leaflet_map():
+        m = folium.Map(
+            location=[-1.286389, 36.817223],
+            zoom_start=12,
+            tiles="CartoDB positron",
+            width="100%",
+            height=600
+        )
+        return ui.HTML(m._repr_html_())
 
 app = App(app_ui, server)
 
