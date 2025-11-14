@@ -92,6 +92,18 @@ app_ui = ui.page_navbar(
                     margin-left: 0;
                 }
             }
+            .navbar-info-icon {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 1.15rem;
+                margin-left: 1rem;
+                color: var(--bs-navbar-color, #495057);
+                text-decoration: none;
+            }
+            .navbar-info-icon:hover {
+                color: var(--bs-primary, #0d6efd);
+            }
             """
         )
     ),
@@ -130,10 +142,45 @@ app_ui = ui.page_navbar(
             ),
         ),
     ),
+    ui.nav_spacer(),
+    ui.nav_control(
+        ui.input_action_button(
+            "show_info",
+            "ⓘ",
+            class_="navbar-info-icon",
+            title="Data info"
+        )
+    ),
     title="Raster Viewer",
 )
 
 def server(input, output, session):
+    def show_about_modal():
+        ui.modal_show(
+            ui.modal(
+                ui.h3("About"),
+                ui.p(
+                    "Modelling dengue and chikungunya transmission patterns for improved "
+                    "public health decision-making in the Horn of Africa"
+                ),
+                ui.p(
+                    "The dashboard serves as a platform for running and displaying results "
+                    "of dengue and Chikungunya transmission models. The models are implemented "
+                    "on a grid of 20km and it couples the mosquito population dynamics "
+                    "sub-model and virus transmission sub-model. The development rates of "
+                    "mosquitoes are dependent on rainfall and temperature. The platform can "
+                    "be used for forecasting the risk of these diseases."
+                ),
+                ui.p("Developed by: ILRI"),
+                ui.p("Version: 1.0"),
+                ui.strong("Contact: info@example.com"),
+                easy_close=True,
+                footer=ui.modal_button("Close"),
+            )
+        )
+
+    session.on_flush(lambda: show_about_modal(), once=True)
+
     @reactive.calc
     def raster_overlay():
         choice = input.selected_variable()
@@ -259,6 +306,10 @@ def server(input, output, session):
             """
         )
 
+    @reactive.effect
+    @reactive.event(input.show_info)
+    def _show_about():
+        show_about_modal()
 app = App(app_ui, server)
 
 
