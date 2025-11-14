@@ -2,7 +2,6 @@ from datetime import date, timedelta
 from io import BytesIO
 import base64
 import os
-
 import folium
 import numpy as np
 import rasterio
@@ -107,18 +106,19 @@ app_ui = ui.page_navbar(
             """
         )
     ),
+    ui.nav_spacer(),
     ui.nav_panel(
-        "Dashboard",
+        "Mosquito",
         ui.div(
             {"class": "app-shell"},
             ui.div(
                 {"class": "app-sidebar"},
-                ui.h3("Variables"),
+                ui.h3("Mosquito variables"),
                 ui.input_radio_buttons(
                     "selected_variable",
                     "Select variable:",
-                    choices=list(variable_options.keys()),
-                    selected=list(variable_options.keys())[0],
+                    choices=list(mosquito_variables.keys()),
+                    selected=list(mosquito_variables.keys())[0],
                 ),
                 ui.input_slider(
                     "selected_date",
@@ -142,6 +142,44 @@ app_ui = ui.page_navbar(
             ),
         ),
     ),
+    ui.nav_panel(
+        "Climate",
+        ui.div(
+            {"class": "app-shell"},
+            ui.div(
+                {"class": "app-sidebar"},
+                ui.h3("Climate variables"),
+                ui.input_radio_buttons(
+                    "selected_climate_variable",
+                    "Select variable:",
+                    choices=list(climatic_variables.keys()),
+                    selected=list(climatic_variables.keys())[0],
+                ),
+                ui.input_slider(
+                    "selected_climate_date",
+                    "Select date:",
+                    min=date_min,
+                    max=date_max,
+                    value=date_min,
+                    step=timedelta(days=1),
+                ),
+                ui.div(
+                    ui.output_ui("climate_legend_panel"),
+                    style="margin-top:1.5rem;",
+                ),
+            ),
+            ui.div(
+                {"class": "app-main"},
+                ui.div(
+                    {"class": "map-container"},
+                    ui.output_ui("climate_map"),
+                ),
+            ),
+        ),
+    ),
+    ui.nav_panel(
+        "Computation"
+    ),
     ui.nav_spacer(),
     ui.nav_control(
         ui.input_action_button(
@@ -151,7 +189,7 @@ app_ui = ui.page_navbar(
             title="Data info"
         )
     ),
-    title="Raster Viewer",
+    title="ARBO WATCH Network",
 )
 
 def server(input, output, session):
@@ -181,24 +219,20 @@ def server(input, output, session):
 
     session.on_flush(lambda: show_about_modal(), once=True)
 
-    @reactive.calc
-    def raster_overlay():
-        choice = input.selected_variable()
-        selected_date = input.selected_date()
-        if not choice or not selected_date:
+    def build_overlay(prefix_map, variable_name, selected_date):
+        if not variable_name or not selected_date:
             return None
-
-        prefix = variable_options.get(choice, "")
+        prefix = prefix_map.get(variable_name, "")
+        if not prefix:
+            return None
         date_str = selected_date.strftime("%Y%m%d")
         tiff_path = os.path.join("rasters_by_date", f"{prefix}{date_str}.tif")
         if not os.path.exists(tiff_path):
             return None
-
         with rasterio.open(tiff_path) as src:
             band = src.read(1, masked=True).astype(float)
             bounds_src = src.bounds
             crs = src.crs
-
         if crs is not None and crs.to_string() != "EPSG:4326":
             left, bottom, right, top = transform_bounds(crs, "EPSG:4326", *bounds_src)
         else:
@@ -208,11 +242,9 @@ def server(input, output, session):
                 bounds_src.right,
                 bounds_src.top,
             )
-
         masked_band = np.ma.masked_invalid(band)
         if masked_band.count() == 0:
             return None
-
         data = masked_band.filled(np.nan)
         vmin = float(np.nanmin(data))
         vmax = float(np.nanmax(data))
@@ -220,29 +252,40 @@ def server(input, output, session):
         if not np.isclose(vmin, vmax):
             norm = (data - vmin) / (vmax - vmin)
         norm = np.ma.array(norm, mask=~np.isfinite(data))
-
         cmap = cm.get_cmap("viridis").copy()
         cmap.set_bad(alpha=0)
-
         buf = BytesIO()
         plt.imsave(buf, norm, cmap=cmap, format="png")
         buf.seek(0)
         image_uri = f"data:image/png;base64,{base64.b64encode(buf.read()).decode('utf-8')}"
-
         return {
             "image_uri": image_uri,
             "bounds": ((bottom, left), (top, right)),
             "legend": {
-                "label": choice,
+                "label": variable_name,
                 "date_label": selected_date.strftime("%d %b %Y"),
                 "vmin": vmin,
                 "vmax": vmax,
             },
         }
 
-    @output
-    @render.ui
-    def leaflet_map():
+    @reactive.calc
+    def raster_overlay_mosquito():
+        return build_overlay(
+            mosquito_variables,
+            input.selected_variable(),
+            input.selected_date(),
+        )
+
+    @reactive.calc
+    def raster_overlay_climate():
+        return build_overlay(
+            climatic_variables,
+            input.selected_climate_variable(),
+            input.selected_climate_date(),
+        )
+
+    def render_map(overlay):
         m = folium.Map(
             location=[-1.286389, 36.817223],
             zoom_start=5,
@@ -250,8 +293,6 @@ def server(input, output, session):
             width="100%",
             height=700,
         )
-
-        overlay = raster_overlay()
         if overlay is not None:
             (bottom, left), (top, right) = overlay["bounds"]
             folium.raster_layers.ImageOverlay(
@@ -259,14 +300,10 @@ def server(input, output, session):
                 bounds=[[bottom, left], [top, right]],
                 opacity=0.7,
             ).add_to(m)
-
         folium.LayerControl().add_to(m)
         return ui.HTML(m._repr_html_())
 
-    @output
-    @render.ui
-    def legend_panel():
-        overlay = raster_overlay()
+    def render_legend(overlay):
         if overlay is None:
             return ui.HTML(
                 """
@@ -275,7 +312,6 @@ def server(input, output, session):
                 </div>
                 """
             )
-
         legend = overlay["legend"]
         return ui.HTML(
             f"""
@@ -305,6 +341,26 @@ def server(input, output, session):
             </div>
             """
         )
+
+    @output
+    @render.ui
+    def leaflet_map():
+        return render_map(raster_overlay_mosquito())
+
+    @output
+    @render.ui
+    def legend_panel():
+        return render_legend(raster_overlay_mosquito())
+
+    @output
+    @render.ui
+    def climate_map():
+        return render_map(raster_overlay_climate())
+
+    @output
+    @render.ui
+    def climate_legend_panel():
+        return render_legend(raster_overlay_climate())
 
     @reactive.effect
     @reactive.event(input.show_info)
